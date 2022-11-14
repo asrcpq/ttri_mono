@@ -1,0 +1,8 @@
+[package]
+name = "ttri_mono"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+unicode-width = "0.1"
+ttri_model = {path = "../ttri_model"}
