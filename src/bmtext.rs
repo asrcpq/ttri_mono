@@ -1,9 +1,14 @@
+use anyhow::{Result, anyhow};
 use ttri_model::cmodel::{Face, Model};
 
-pub fn wide_test(ch: char) -> bool {
-	match unicode_width::UnicodeWidthChar::width(ch) {
-		Some(x) => x >= 2,
-		None => true,
+pub fn wide_test(ch: u32) -> bool {
+	if let Some(ch) = char::from_u32(ch) {
+		match unicode_width::UnicodeWidthChar::width(ch) {
+			Some(x) => x >= 2,
+			None => true,
+		}
+	} else {
+		false
 	}
 }
 
@@ -50,7 +55,7 @@ impl FontConfig {
 		self.font_size
 	}
 
-	fn generate_vs(&self) -> Vec<[f32; 4]> {
+	fn generate_vs(&self) -> [Vec<[f32; 4]>; 2] {
 		let [xx, yy] = self.get_terminal_size_in_char();
 		let [col, row] = self.get_scaled_font_size();
 		let mut vs = Vec::new();
@@ -59,7 +64,14 @@ impl FontConfig {
 				vs.push([(x * col) as f32, (y * row) as f32, 0.0, 1.0]);
 			}
 		}
-		vs
+		let mut bvs = Vec::new();
+		// background layer
+		for y in 0..=yy {
+			for x in 0..=xx {
+				bvs.push([(x * col) as f32, (y * row) as f32, 0.5, 1.0]);
+			}
+		}
+		[vs, bvs]
 	}
 
 	fn generate_uvs(&self) -> Vec<[f32; 2]> {
@@ -80,14 +92,21 @@ impl FontConfig {
 		uvs
 	}
 
-	pub fn generate_model(&self) -> Model {
-		let vs = self.generate_vs();
+	pub fn generate_models(&self) -> [Model; 2] {
+		let [vs, bvs] = self.generate_vs();
 		let uvs = self.generate_uvs();
-		Model {
-			vs,
-			uvs,
-			faces: Default::default(),
-		}
+		[
+			Model {
+				vs,
+				uvs,
+				faces: Default::default(),
+			},
+			Model {
+				vs: bvs,
+				uvs: Default::default(),
+				faces: Default::default(),
+			},
+		]
 	}
 
 	pub fn get_terminal_size_in_char(&self) -> [u32; 2] {
@@ -104,59 +123,58 @@ impl FontConfig {
 		]
 	}
 
-	pub fn text2fs(
+	pub fn char(
 		&self,
 		offset: [u32; 2],
-		text: impl Iterator<Item = char>,
-		color: [f32; 4],
-		layer: i32,
-	) -> Vec<Face> {
+		ch: u32,
+		fg_color: [f32; 4],
+		bg_color: [f32; 4],
+		tex_layer: i32,
+	) -> Result<[Face; 4]> {
 		// x1 terminal size(in char), x2 texture size(in char)
 		let [x1, y1] = self.get_terminal_size_in_char();
-		let mut idx = offset[0] + offset[1] * x1;
+		let idx = offset[0] + offset[1] * x1;
 		let [x2, _] = self.get_texture_size_in_char();
-		let mut result = Vec::new();
-		for ch in text {
-			let wide = wide_test(ch);
-			let ch = ch as u32;
-			// 10 chars has 11 vertices
-			let pos_x = idx % x1;
-			let pos_y = idx / x1;
-			if wide {
-				idx += 2;
-			} else {
-				idx += 1;
-			}
-
-			if pos_x >= x1 || pos_y >= y1 || pos_x == x1 - 1 && wide {
-				// TODO: print less error
-				eprintln!("text overflow");
-				continue;
-			}
-			let screen_leftup = (pos_y * (x1 + 1) + pos_x) as usize;
-			let screen_leftdown = ((pos_y + 1) * (x1 + 1) + pos_x) as usize;
-
-			let pos_x = ch % x2;
-			let pos_y = ch / x2;
-			let texture_leftup = (pos_y * (x2 + 1) + pos_x) as usize * 2;
-			let texture_leftdown = ((pos_y + 1) * (x2 + 1) + pos_x) as usize * 2;
-
-			let n = if wide { 2 } else { 1 };
-			let face1 = Face {
-				vid: [screen_leftup, screen_leftup + n, screen_leftdown],
-				color,
-				layer,
-				uvid: [texture_leftup, texture_leftup + n, texture_leftdown],
-			};
-			let face2 = Face {
-				vid: [screen_leftup + n, screen_leftdown, screen_leftdown + n],
-				color,
-				layer,
-				uvid: [texture_leftup + n, texture_leftdown, texture_leftdown + n],
-			};
-			result.push(face1);
-			result.push(face2);
+		let wide = wide_test(ch);
+		// 10 chars has 11 vertices
+		let pos_x = idx % x1;
+		let pos_y = idx / x1;
+		if pos_x >= x1 || pos_y >= y1 || pos_x == x1 - 1 && wide {
+			return Err(anyhow!("text overflow"))
 		}
-		result
+		let screen_leftup = (pos_y * (x1 + 1) + pos_x) as usize;
+		let screen_leftdown = ((pos_y + 1) * (x1 + 1) + pos_x) as usize;
+
+		let pos_x = ch % x2;
+		let pos_y = ch / x2;
+		let texture_leftup = (pos_y * (x2 + 1) + pos_x) as usize * 2;
+		let texture_leftdown = ((pos_y + 1) * (x2 + 1) + pos_x) as usize * 2;
+
+		let n = if wide { 2 } else { 1 };
+		let face0 = Face {
+			vid: [screen_leftup, screen_leftup + n, screen_leftdown],
+			color: fg_color,
+			layer: tex_layer,
+			uvid: [texture_leftup, texture_leftup + n, texture_leftdown],
+		};
+		let face1 = Face {
+			vid: [screen_leftup + n, screen_leftdown, screen_leftdown + n],
+			color: fg_color,
+			layer: tex_layer,
+			uvid: [texture_leftup + n, texture_leftdown, texture_leftdown + n],
+		};
+		let face2 = Face {
+			vid: [screen_leftup, screen_leftup + n, screen_leftdown],
+			color: bg_color,
+			layer: -2,
+			uvid: [0; 3],
+		};
+		let face3 = Face {
+			vid: [screen_leftup + n, screen_leftdown, screen_leftdown + n],
+			color: bg_color,
+			layer: -2,
+			uvid: [0; 3],
+		};
+		Ok([face0, face1, face2, face3])
 	}
 }
